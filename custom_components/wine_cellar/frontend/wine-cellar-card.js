@@ -4892,6 +4892,28 @@ WineDetailDialog = __decorate([
     t("wine-detail-dialog")
 ], WineDetailDialog);
 
+// Mirrors MAX_RACK_DEPTH in the backend's const.py.
+const MAX_RACK_DEPTH = 20;
+function growKind(cabinet, zone) {
+    if (!cabinet)
+        return null;
+    if (!zone)
+        return "depth";
+    if (zone === "bottom")
+        return null;
+    const sr = storageRowFor(cabinet, zone);
+    if (!sr)
+        return null;
+    return sr.type === "box" ? "box" : "bin";
+}
+function zoneLabel(sr) {
+    return sr?.name || (sr?.type === "box" ? "This box" : "This bin");
+}
+// The smallest standard box that covers what is missing, else the biggest one.
+function defaultBoxSize(needed) {
+    return BOX_SIZES.find((size) => size >= needed) ?? BOX_SIZES[BOX_SIZES.length - 1];
+}
+
 let BarcodeScanner = class BarcodeScanner extends i {
     constructor() {
         super(...arguments);
@@ -5120,6 +5142,247 @@ BarcodeScanner = __decorate([
     t("barcode-scanner")
 ], BarcodeScanner);
 
+// Asks to make room in a full container, then does it. Replaces the old
+// "it's full, go and raise its capacity in Manage Racks" dead end. Always asks:
+// nothing here grows on its own.
+//
+// What "bigger" means depends on the container, see utils/grow.ts.
+let WineGrowDialog = class WineGrowDialog extends i {
+    constructor() {
+        super(...arguments);
+        this.cabinet = null;
+        // "storage-N" for a bin or box row, "" for a grid slot.
+        this.zone = "";
+        // How many places are missing: the bottles being placed minus what is free.
+        this.needed = 1;
+        this._add = 1;
+        this._boxSize = 12;
+        this._busy = false;
+        this._error = "";
+    }
+    willUpdate(changed) {
+        if (changed.has("needed") || changed.has("zone") || changed.has("cabinet")) {
+            const needed = Math.max(1, Math.round(this.needed) || 1);
+            this._add = needed;
+            this._boxSize = defaultBoxSize(needed);
+            this._error = "";
+        }
+    }
+    _cancel() {
+        this.dispatchEvent(new CustomEvent("cancel", { bubbles: true, composed: true }));
+    }
+    async _confirm() {
+        if (!this.cabinet)
+            return;
+        const kind = growKind(this.cabinet, this.zone);
+        this._busy = true;
+        this._error = "";
+        try {
+            const result = await this.hass.callWS({
+                type: "wine_cellar/grow_container",
+                cabinet_id: this.cabinet.id,
+                zone: this.zone,
+                add: this._add,
+                ...(kind === "box" ? { box_size: this._boxSize } : {}),
+            });
+            if (result?.error) {
+                this._error = result.error;
+            }
+            else {
+                this.dispatchEvent(new CustomEvent("grown", { detail: { cabinet: result?.cabinet }, bubbles: true, composed: true }));
+            }
+        }
+        catch {
+            this._error = "Could not make room. Try again.";
+        }
+        this._busy = false;
+    }
+    _body(kind) {
+        const cab = this.cabinet;
+        if (kind === "depth") {
+            const depth = cab.depth || 1;
+            const room = MAX_RACK_DEPTH - depth;
+            if (room <= 0) {
+                return {
+                    text: `${cab.name} is already ${MAX_RACK_DEPTH} deep, the maximum. Pick another slot, or free one.`,
+                    canConfirm: false,
+                    controls: A,
+                    confirmLabel: "",
+                };
+            }
+            const add = Math.min(this._add, room);
+            const slots = getRackSlots(cab).length;
+            return {
+                text: `Every slot of ${cab.name} holds ${depth} bottle${depth > 1 ? "s" : ""}, one behind the other. Make the whole rack ${depth + add} deep? That is ${slots * add} more places in total.`,
+                canConfirm: true,
+                confirmLabel: `Make it ${depth + add} deep`,
+                controls: b `
+          <div class="grow-stepper">
+            <button ?disabled=${this._add <= 1} @click=${() => (this._add = this._add - 1)}>−</button>
+            <span class="val">+${add}</span>
+            <button ?disabled=${this._add >= room} @click=${() => (this._add = this._add + 1)}>+</button>
+          </div>
+        `,
+            };
+        }
+        const sr = storageRowFor(cab, this.zone);
+        const name = zoneLabel(sr);
+        const capacity = sr ? zoneCapacity(sr) : 0;
+        if (kind === "box") {
+            return {
+                text: `Add a box to ${name} (${capacity} → ${capacity + this._boxSize} places). Which size?`,
+                canConfirm: true,
+                confirmLabel: `Add a box of ${this._boxSize}`,
+                controls: b `
+          <div class="grow-sizes">
+            ${BOX_SIZES.map((size) => b `
+                <button
+                  class="btn ${this._boxSize === size ? "btn-primary" : "btn-outline"}"
+                  style="padding:6px 12px"
+                  @click=${() => (this._boxSize = size)}
+                >${size}</button>
+              `)}
+          </div>
+        `,
+            };
+        }
+        return {
+            text: `Add places to ${name} (${capacity} → ${capacity + this._add}).`,
+            canConfirm: true,
+            confirmLabel: `Add ${this._add} place${this._add > 1 ? "s" : ""}`,
+            controls: b `
+        <div class="grow-stepper">
+          <button ?disabled=${this._add <= 1} @click=${() => (this._add = this._add - 1)}>−</button>
+          <span class="val">+${this._add}</span>
+          <button @click=${() => (this._add = this._add + 1)}>+</button>
+        </div>
+      `,
+        };
+    }
+    render() {
+        if (!this.cabinet)
+            return A;
+        const kind = growKind(this.cabinet, this.zone);
+        if (!kind)
+            return A;
+        const body = this._body(kind);
+        const sr = storageRowFor(this.cabinet, this.zone);
+        const title = kind === "depth" ? "This slot is full" : `${zoneLabel(sr)} is full`;
+        return b `
+      <div class="dialog-overlay grow-overlay" @click=${this._cancel}>
+        <div class="dialog grow-box" @click=${(e) => e.stopPropagation()}>
+          <h3>${title}</h3>
+          <p>${body.text}</p>
+          ${body.controls}
+          ${this._error ? b `<div class="grow-error">${this._error}</div>` : A}
+          <div class="grow-actions">
+            ${body.canConfirm
+            ? b `<button class="btn btn-primary" ?disabled=${this._busy} @click=${this._confirm}>
+                  ${this._busy ? "Working…" : body.confirmLabel}
+                </button>`
+            : A}
+            <button class="btn btn-outline" ?disabled=${this._busy} @click=${this._cancel}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    `;
+    }
+};
+WineGrowDialog.styles = [
+    sharedStyles,
+    i$3 `
+      .grow-overlay {
+        z-index: 1000;
+      }
+      .grow-box {
+        max-width: 360px;
+        padding: 22px;
+        text-align: center;
+      }
+      .grow-box h3 {
+        margin: 0 0 6px;
+        font-size: 1.05em;
+        color: var(--wc-text);
+      }
+      .grow-box p {
+        margin: 0 0 14px;
+        font-size: 0.88em;
+        color: var(--wc-text-secondary);
+      }
+      .grow-stepper {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .grow-stepper button {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        border: 1px solid var(--wc-border);
+        background: transparent;
+        color: var(--wc-text);
+        font-size: 1.1em;
+        cursor: pointer;
+      }
+      .grow-stepper button:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+      .grow-stepper .val {
+        min-width: 48px;
+        font-size: 1.3em;
+        font-weight: 600;
+        color: var(--wc-text);
+      }
+      .grow-sizes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+        margin-bottom: 14px;
+      }
+      .grow-actions {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .grow-error {
+        color: #ef5350;
+        font-size: 0.85em;
+        margin-bottom: 10px;
+      }
+    `,
+];
+__decorate([
+    n({ attribute: false })
+], WineGrowDialog.prototype, "hass", void 0);
+__decorate([
+    n({ attribute: false })
+], WineGrowDialog.prototype, "cabinet", void 0);
+__decorate([
+    n({ type: String })
+], WineGrowDialog.prototype, "zone", void 0);
+__decorate([
+    n({ type: Number })
+], WineGrowDialog.prototype, "needed", void 0);
+__decorate([
+    r()
+], WineGrowDialog.prototype, "_add", void 0);
+__decorate([
+    r()
+], WineGrowDialog.prototype, "_boxSize", void 0);
+__decorate([
+    r()
+], WineGrowDialog.prototype, "_busy", void 0);
+__decorate([
+    r()
+], WineGrowDialog.prototype, "_error", void 0);
+WineGrowDialog = __decorate([
+    t("wine-grow-dialog")
+], WineGrowDialog);
+
 let AddWineDialog = class AddWineDialog extends i {
     constructor() {
         super(...arguments);
@@ -5141,6 +5404,8 @@ let AddWineDialog = class AddWineDialog extends i {
         this._lookupResult = null;
         this._wineData = {};
         this._error = "";
+        this._grow = null;
+        this._afterGrow = null;
         this._hasGemini = false;
         this._labelLoading = false;
         this._captureStage = "front";
@@ -5160,6 +5425,11 @@ let AddWineDialog = class AddWineDialog extends i {
             : ["scan", "details", "location", "confirm"];
     }
     updated(changedProps) {
+        if (changedProps.has("cabinets") && this._afterGrow) {
+            const after = this._afterGrow;
+            this._afterGrow = null;
+            this._runAfterGrow(after);
+        }
         if (changedProps.has("open")) {
             if (this.open) {
                 this._step = "scan";
@@ -5172,6 +5442,8 @@ let AddWineDialog = class AddWineDialog extends i {
                 this._addProgress = 0;
                 this._session++;
                 this._labelLoading = false;
+                this._grow = null;
+                this._afterGrow = null;
                 this._searchResults = [];
                 this._captureStage = "front";
                 this._frontImageRaw = "";
@@ -5432,10 +5704,9 @@ let AddWineDialog = class AddWineDialog extends i {
         // Adding a bottle used to append past the end of a full bin, silently
         // growing it beyond its configured capacity. Refuse instead, the way
         // drag-and-drop and paste already do.
-        const { used, capacity, nextDepth, full } = this._zoneUsage(sr);
-        const label = sr.name || (sr.type === "box" ? "This box" : "This bin");
+        const { nextDepth, full } = this._zoneUsage(sr);
         if (full) {
-            this._error = `${label} is full (${used}/${capacity}). Free a slot, or raise its capacity in Manage Racks.`;
+            this._offerGrow(this._wineData.cabinet_id || "", `storage-${sr.row}`, 1, { kind: "zone", zone: `storage-${sr.row}` });
             return;
         }
         this._error = "";
@@ -5453,11 +5724,45 @@ let AddWineDialog = class AddWineDialog extends i {
         const cabinet = this.cabinets.find((cab) => cab.id === c.cabinetId);
         const patch = placementIn(c, cabinet, this.wines);
         if (!patch) {
-            this._error = `${containerLabel(c, this.cabinets)} is full. Free a slot, or raise its capacity in Manage Racks.`;
+            // A bin, a box row or a grid slot can be made bigger; the bottom zone
+            // never reports full.
+            this._offerGrow(c.cabinetId, c.kind === "zone" ? c.zone : "", 1, { kind: "container", container: c });
             return;
         }
         this._error = "";
         this._wineData = { ...this._wineData, ...patch };
+    }
+    // Ask whether to make the full container bigger, instead of refusing.
+    _offerGrow(cabinetId, zone, needed, after) {
+        const cabinet = this.cabinets.find((c) => c.id === cabinetId);
+        if (!growKind(cabinet, zone)) {
+            this._error = "That destination is full.";
+            return;
+        }
+        this._error = "";
+        this._grow = { cabinetId, zone, needed, after };
+    }
+    _onGrown() {
+        const after = this._grow?.after ?? { kind: "none" };
+        this._grow = null;
+        // The cabinets prop is replaced by the card once it has reloaded; the
+        // pending action runs then, in updated(), against the new size.
+        this._afterGrow = after;
+        this.dispatchEvent(new CustomEvent("cabinets-changed", { bubbles: true, composed: true }));
+    }
+    _runAfterGrow(after) {
+        if (after.kind === "zone") {
+            const cabinet = this.cabinets.find((c) => c.id === this._wineData.cabinet_id);
+            const sr = cabinet?.storage_rows.find((r) => `storage-${r.row}` === after.zone);
+            if (sr)
+                this._selectZone(sr);
+        }
+        else if (after.kind === "container") {
+            this._applyContainer(after.container);
+        }
+        else if (after.kind === "next") {
+            this._onLocationNext();
+        }
     }
     _planSlots(count) {
         return planSlots(this._wineData, this.cabinets, this.wines, count);
@@ -5467,10 +5772,16 @@ let AddWineDialog = class AddWineDialog extends i {
         const free = freeAt(this._wineData, this.cabinets, this.wines);
         return Number.isFinite(free) ? free : null;
     }
-    _setQuantity(value) {
+    // A bin or box can be made bigger on the spot, so more bottles than there is
+    // room for may be asked for there; elsewhere the free space is the limit.
+    _maxQuantity() {
         const available = this._availableSlots();
-        const max = available === null ? 99 : Math.max(1, Math.min(99, available));
-        this._quantity = Math.max(1, Math.min(max, Math.round(value) || 1));
+        if (available === null || this._wineData.zone)
+            return 99;
+        return Math.max(1, Math.min(99, available));
+    }
+    _setQuantity(value) {
+        this._quantity = Math.max(1, Math.min(this._maxQuantity(), Math.round(value) || 1));
     }
     async _addWine() {
         this._loading = true;
@@ -5486,6 +5797,11 @@ let AddWineDialog = class AddWineDialog extends i {
                 const slots = this._planSlots(this._quantity);
                 if (!slots.length) {
                     this._error = "No free slot left at that destination.";
+                    this._loading = false;
+                    return;
+                }
+                if (slots.length < this._quantity) {
+                    this._error = `Room for ${slots.length} of the ${this._quantity} bottles. Make room first, or lower the quantity.`;
                     this._loading = false;
                     return;
                 }
@@ -5925,7 +6241,6 @@ let AddWineDialog = class AddWineDialog extends i {
             return b `
             <button
               class="suggest-item ${s.usage.full ? "full" : ""} ${selected ? "selected" : ""}"
-              ?disabled=${s.usage.full}
               @click=${() => this._applyContainer(s.container)}
             >
               <span class="suggest-where">${s.label}</span>
@@ -5994,7 +6309,7 @@ let AddWineDialog = class AddWineDialog extends i {
                   <button
                     class="btn ${selected ? "btn-primary" : "btn-outline"}"
                     style="font-size:0.8em;padding:6px 10px${usage.full ? ";opacity:0.5" : ""}"
-                    title=${usage.full ? "Full — free a slot or raise its capacity" : ""}
+                    title=${usage.full ? "Full — click to make room" : ""}
                     @click=${() => this._selectZone(sr)}
                   >
                     ${sr.name || (sr.type === "box" ? "Box" : "Bulk Bin")}
@@ -6073,7 +6388,7 @@ let AddWineDialog = class AddWineDialog extends i {
             while (occupied.has(depth))
                 depth++;
             if (depth >= rackDepth) {
-                this._error = `Row ${d.row + 1}, column ${d.col + 1} is full (${occupied.size}/${rackDepth} deep).`;
+                this._offerGrow(d.cabinet_id || "", "", 1, { kind: "next" });
                 return;
             }
             this._wineData = { ...this._wineData, depth };
@@ -6083,7 +6398,8 @@ let AddWineDialog = class AddWineDialog extends i {
     }
     _renderQuantityPicker() {
         const available = this._availableSlots();
-        const max = available === null ? 99 : Math.max(1, Math.min(99, available));
+        const max = this._maxQuantity();
+        const shortfall = available !== null && this._wineData.zone ? Math.max(0, this._quantity - available) : 0;
         const destination = this._wineData.cabinet_id
             ? this._planSlots(this._quantity)
             : null;
@@ -6114,12 +6430,19 @@ let AddWineDialog = class AddWineDialog extends i {
       <div class="qty-hint">
         ${available === null
             ? "Identical bottles, added unassigned."
-            : available === 0
-                ? "That destination is full."
-                : b `${available} slot${available > 1 ? "s" : ""} free here.
+            : shortfall > 0
+                ? b `Only ${available} free here.
+                <button
+                  class="btn btn-outline"
+                  style="font-size:0.85em;padding:4px 10px;margin-left:6px"
+                  @click=${() => this._offerGrow(this._wineData.cabinet_id || "", this._wineData.zone || "", shortfall, { kind: "none" })}
+                >Make room for ${shortfall} more</button>`
+                : available === 0
+                    ? "That destination is full."
+                    : b `${available} slot${available > 1 ? "s" : ""} free here.
               ${destination && destination.length > 1
-                    ? `The ${destination.length} bottles take consecutive free slots.`
-                    : ""}`}
+                        ? `The ${destination.length} bottles take consecutive free slots.`
+                        : ""}`}
       </div>
     `;
     }
@@ -6216,6 +6539,9 @@ let AddWineDialog = class AddWineDialog extends i {
     render() {
         if (!this.open)
             return A;
+        const growCabinet = this._grow
+            ? this.cabinets.find((c) => c.id === this._grow.cabinetId) ?? null
+            : null;
         return b `
       <div class="dialog-overlay" @click=${this._close}>
         <div class="dialog" @click=${(e) => e.stopPropagation()}>
@@ -6227,6 +6553,16 @@ let AddWineDialog = class AddWineDialog extends i {
           ${this._step === "confirm" ? this._renderConfirmStep() : A}
         </div>
       </div>
+      ${this._grow && growCabinet
+            ? b `<wine-grow-dialog
+            .hass=${this.hass}
+            .cabinet=${growCabinet}
+            .zone=${this._grow.zone}
+            .needed=${this._grow.needed}
+            @grown=${this._onGrown}
+            @cancel=${() => (this._grow = null)}
+          ></wine-grow-dialog>`
+            : A}
     `;
     }
 };
@@ -6791,6 +7127,9 @@ __decorate([
 __decorate([
     r()
 ], AddWineDialog.prototype, "_error", void 0);
+__decorate([
+    r()
+], AddWineDialog.prototype, "_grow", void 0);
 __decorate([
     r()
 ], AddWineDialog.prototype, "_hasGemini", void 0);
@@ -11771,6 +12110,9 @@ let WineCellarCard = class WineCellarCard extends i {
         this._showBatchVivinoConfirm = false;
         this._showBatchAiConfirm = false;
         this._batchReprice = false;
+        // A full bin or box the user is being asked to make bigger, and what to
+        // re-run once it is (paste / move / drop all stopped at "full" before).
+        this._grow = null;
         this._batchAiFallback = false;
         this._toast = "";
         this._hasGemini = false;
@@ -12165,12 +12507,22 @@ let WineCellarCard = class WineCellarCard extends i {
         const { cabinet, zone, storageRow } = e.detail;
         const occupantCount = this._wines.filter((w) => w.cabinet_id === cabinet.id && w.zone === zone).length;
         const nextDepth = this._firstFreeDepth(cabinet.id, zone);
-        const capacity = storageRow.capacity || 20;
+        const capacity = zoneCapacity(storageRow) || 20;
         const hasRoom = occupantCount < capacity && nextDepth < capacity;
+        // Full: offer to make it bigger, then redo this click against the new size.
+        const offerGrow = () => this._offerGrow(cabinet.id, zone, () => {
+            const fresh = this._cabinets.find((c) => c.id === cabinet.id);
+            const freshRow = fresh?.storage_rows?.find((r) => `storage-${r.row}` === zone);
+            if (fresh && freshRow) {
+                this._onZoneContainerClick(new CustomEvent("zone-container-click", {
+                    detail: { cabinet: fresh, zone, storageRow: freshRow },
+                }));
+            }
+        });
         // If we have a copied wine, paste it in this zone instead of opening panel
         if (this._copiedWine) {
             if (!hasRoom) {
-                this._showToast(`"${storageRow.name || "Zone"}" is full — cannot paste here.`);
+                offerGrow();
                 return;
             }
             this._pasteWine(cabinet.id, null, null, nextDepth, zone);
@@ -12179,7 +12531,7 @@ let WineCellarCard = class WineCellarCard extends i {
         // If moving wine, drop it in this zone instead of opening panel
         if (this._movingWine) {
             if (!hasRoom) {
-                this._showToast(`"${storageRow.name || "Zone"}" is full — cannot move here.`);
+                offerGrow();
                 return;
             }
             this._executeMoveWine(cabinet.id, null, null, zone);
@@ -12187,13 +12539,23 @@ let WineCellarCard = class WineCellarCard extends i {
         }
         if (this._movingBuyListItem) {
             if (!hasRoom) {
-                this._showToast(`"${storageRow.name || "Zone"}" is full — cannot move here.`);
+                offerGrow();
                 return;
             }
             this._executeMoveTocellar(cabinet.id, null, null, zone);
             return;
         }
         this._openZonePanel(cabinet, zone, storageRow);
+    }
+    // Ask whether to make a full bin or box bigger; `retry` runs once it is.
+    _offerGrow(cabinetId, zone, retry) {
+        this._grow = { cabinetId, zone, retry };
+    }
+    async _onGrown() {
+        const grow = this._grow;
+        this._grow = null;
+        await this._loadData();
+        grow?.retry();
     }
     _openZonePanel(cabinet, zone, storageRow) {
         this._zonePanelCabinet = cabinet;
@@ -12834,10 +13196,10 @@ let WineCellarCard = class WineCellarCard extends i {
                 const targetCabinet = this._cabinets.find((c) => c.id === d.targetCabinetId);
                 const rowIdx = parseInt(d.targetZone.replace("storage-", ""), 10);
                 const storageRow = targetCabinet?.storage_rows?.find((s) => s.row === rowIdx);
-                const capacity = storageRow?.capacity || 20;
+                const capacity = (storageRow ? zoneCapacity(storageRow) : 0) || 20;
                 targetDepth = this._firstFreeDepth(d.targetCabinetId, d.targetZone, d.wineId);
                 if (storageRow && (occupants.length >= capacity || targetDepth >= capacity)) {
-                    this._showToast(`"${storageRow.name || "Zone"}" is full — cannot move here.`);
+                    this._offerGrow(d.targetCabinetId, d.targetZone, () => this._onWineDrop(e));
                     return;
                 }
             }
@@ -14011,7 +14373,20 @@ let WineCellarCard = class WineCellarCard extends i {
           @close=${() => { this._showAddDialog = false; this._addToBuyListMode = false; }}
           @wine-added=${this._onWineAdded}
           @buy-list-updated=${() => this._loadData()}
+          @cabinets-changed=${() => this._loadData()}
         ></add-wine-dialog>
+
+        <!-- Make a full bin or box bigger (paste / move / drop) -->
+        ${this._grow
+            ? b `<wine-grow-dialog
+              .hass=${this.hass}
+              .cabinet=${this._cabinets.find((c) => c.id === this._grow.cabinetId) ?? null}
+              .zone=${this._grow.zone}
+              .needed=${1}
+              @grown=${this._onGrown}
+              @cancel=${() => (this._grow = null)}
+            ></wine-grow-dialog>`
+            : A}
 
         <!-- Wine List Scanner Dialog -->
         <wine-list-dialog
@@ -14907,6 +15282,9 @@ __decorate([
 __decorate([
     r()
 ], WineCellarCard.prototype, "_batchReprice", void 0);
+__decorate([
+    r()
+], WineCellarCard.prototype, "_grow", void 0);
 __decorate([
     r()
 ], WineCellarCard.prototype, "_batchAiFallback", void 0);

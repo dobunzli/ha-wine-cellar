@@ -13,6 +13,8 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
 from .const import (
+    BOX_SIZES,
+    MAX_BIN_CAPACITY,
     CONF_AI_FALLBACK_ALWAYS,
     CONF_DISMISSED_ARRANGEMENTS,
     CONF_METADATA_CURRENCY,
@@ -340,6 +342,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_search_wine)
     websocket_api.async_register_command(hass, ws_get_stats)
     websocket_api.async_register_command(hass, ws_update_cabinet)
+    websocket_api.async_register_command(hass, ws_grow_container)
     websocket_api.async_register_command(hass, ws_add_cabinet)
     websocket_api.async_register_command(hass, ws_remove_cabinet)
     websocket_api.async_register_command(hass, ws_recognize_label)
@@ -789,6 +792,34 @@ async def ws_update_cabinet(
     if cabinet:
         await storage.async_save()
         hass.bus.async_fire(f"{DOMAIN}_updated")
+    connection.send_result(msg["id"], {"cabinet": cabinet})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "wine_cellar/grow_container",
+        vol.Required("cabinet_id"): str,
+        vol.Optional("zone", default=""): str,
+        vol.Optional("add", default=1): vol.All(int, vol.Range(min=1, max=MAX_BIN_CAPACITY)),
+        vol.Optional("box_size"): vol.In(BOX_SIZES),
+    }
+)
+@websocket_api.async_response
+async def ws_grow_container(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Make room in a full bin, box row or grid rack (never removes anything)."""
+    storage = hass.data[DOMAIN]["storage"]
+    cabinet, error = storage.grow_container(
+        msg["cabinet_id"], msg.get("zone", ""), msg.get("add", 1), msg.get("box_size")
+    )
+    if error:
+        connection.send_result(msg["id"], {"error": error})
+        return
+    await storage.async_save()
+    hass.bus.async_fire(f"{DOMAIN}_updated")
     connection.send_result(msg["id"], {"cabinet": cabinet})
 
 

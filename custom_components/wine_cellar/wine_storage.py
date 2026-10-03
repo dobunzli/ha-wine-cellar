@@ -17,6 +17,9 @@ from .const import (
     CONF_SETTINGS,
     CONF_WINE_HISTORY,
     CONF_WINES,
+    MAX_BIN_CAPACITY,
+    MAX_BOXES_PER_ROW,
+    MAX_RACK_DEPTH,
     DEFAULT_CABINETS,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -319,6 +322,55 @@ class WineCellarStorage:
                         cabinet[key] = value
                 return cabinet
         return None
+
+    def grow_container(
+        self, cabinet_id: str, zone: str, add: int, box_size: int | None
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Make room in one container; returns (cabinet, error).
+
+        Done here, in one step, rather than by the card sending back a whole
+        edited `storage_rows` list: that would overwrite anything changed since
+        the card last loaded. Only ever adds room, so no bottle can be displaced.
+
+        zone "storage-N" is a bin (capacity + `add`) or a box row (one more box
+        of `box_size`); zone "" is a grid slot, whose capacity is the rack's
+        depth, so the whole rack gets `add` levels deeper.
+        """
+        cabinet = next((c for c in self._data[CONF_CABINETS] if c["id"] == cabinet_id), None)
+        if cabinet is None:
+            return None, "That rack no longer exists."
+
+        if not zone:
+            depth = cabinet.get("depth", 1) or 1
+            if depth >= MAX_RACK_DEPTH:
+                return None, f"The rack is already {MAX_RACK_DEPTH} deep, the maximum."
+            cabinet["depth"] = min(MAX_RACK_DEPTH, depth + add)
+            return cabinet, None
+
+        if zone == "bottom":
+            return None, "The bottom zone has no size limit."
+        sr = next(
+            (s for s in cabinet.get("storage_rows", []) or [] if f"storage-{s.get('row')}" == zone),
+            None,
+        )
+        if sr is None:
+            return None, "That bin no longer exists."
+
+        if sr.get("type") == "box":
+            if not box_size:
+                return None, "Pick a size for the new box."
+            boxes = list(sr.get("boxes") or [])
+            if len(boxes) >= MAX_BOXES_PER_ROW:
+                return None, "That row already has the maximum number of boxes."
+            boxes.append(box_size)
+            sr["boxes"] = boxes
+            sr["capacity"] = sum(boxes)
+        else:
+            capacity = (sr.get("capacity") or 0) + add
+            if capacity > MAX_BIN_CAPACITY:
+                return None, f"A bin cannot hold more than {MAX_BIN_CAPACITY} bottles."
+            sr["capacity"] = capacity
+        return cabinet, None
 
     def remove_cabinet(self, cabinet_id: str) -> bool:
         """Remove a cabinet and unassign its wines."""

@@ -141,7 +141,9 @@
           case "wine_cellar/get_wines":
             return { wines: mockWines };
           case "wine_cellar/get_cabinets":
-            return { cabinets: mockCabinets };
+            // A copy, like a real websocket reply: handing back the same array
+            // would hide "the cabinets changed" from components that wait for it.
+            return { cabinets: JSON.parse(JSON.stringify(mockCabinets)) };
           case "wine_cellar/get_stats":
             return mockStats;
           case "wine_cellar/get_capabilities":
@@ -158,6 +160,27 @@
             const cabToUpdate = mockCabinets.find(c => c.id === msg.cabinet_id);
             if (cabToUpdate && msg.updates) Object.assign(cabToUpdate, msg.updates);
             return { cabinet: cabToUpdate };
+          case "wine_cellar/grow_container": {
+            // Mirrors WineStorage.grow_container closely enough for the card.
+            const gc = mockCabinets.find(c => c.id === msg.cabinet_id);
+            if (!gc) return { error: "That rack no longer exists." };
+            const gAdd = msg.add || 1;
+            if (!msg.zone) {
+              if ((gc.depth || 1) >= 20) return { error: "The rack is already 20 deep, the maximum." };
+              gc.depth = Math.min(20, (gc.depth || 1) + gAdd);
+              return { cabinet: gc };
+            }
+            const gsr = (gc.storage_rows || []).find(s => "storage-" + s.row === msg.zone);
+            if (!gsr) return { error: "That bin no longer exists." };
+            if (gsr.type === "box") {
+              if (!msg.box_size) return { error: "Pick a size for the new box." };
+              gsr.boxes = [...(gsr.boxes || []), msg.box_size];
+              gsr.capacity = gsr.boxes.reduce((a, b) => a + b, 0);
+            } else {
+              gsr.capacity = (gsr.capacity || 0) + gAdd;
+            }
+            return { cabinet: gc };
+          }
           case "wine_cellar/remove_cabinet":
             const cabIdx = mockCabinets.findIndex(c => c.id === msg.cabinet_id);
             if (cabIdx >= 0) mockCabinets.splice(cabIdx, 1);

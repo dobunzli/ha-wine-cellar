@@ -21,13 +21,23 @@ import {
   sameContainer,
 } from "../utils/location";
 import { Suggestion, suggestDestinations } from "../utils/suggest";
+import { growKind } from "../utils/grow";
 
 import "./barcode-scanner";
 import "./label-camera";
 import "./star-rating";
+import "./grow-dialog";
 
 type Step = "scan" | "details" | "location" | "confirm";
 type ScanMode = "idle" | "barcode" | "label";
+
+// What to do once a full container has been made bigger and the card has
+// handed back the updated cabinets.
+type AfterGrow =
+  | { kind: "zone"; zone: string }
+  | { kind: "container"; container: Container }
+  | { kind: "next" }
+  | { kind: "none" };
 
 @customElement("add-wine-dialog")
 export class AddWineDialog extends LitElement {
@@ -51,6 +61,8 @@ export class AddWineDialog extends LitElement {
   @state() private _lookupResult: BarcodeLookupResult | null = null;
   @state() private _wineData: Partial<Wine> = {};
   @state() private _error = "";
+  @state() private _grow: { cabinetId: string; zone: string; needed: number; after: AfterGrow } | null = null;
+  private _afterGrow: AfterGrow | null = null;
   @state() private _hasGemini = false;
   @state() private _labelLoading = false;
   @state() private _captureStage: "front" | "back" = "front";
@@ -576,6 +588,11 @@ export class AddWineDialog extends LitElement {
   }
 
   updated(changedProps: Map<string, unknown>) {
+    if (changedProps.has("cabinets") && this._afterGrow) {
+      const after = this._afterGrow;
+      this._afterGrow = null;
+      this._runAfterGrow(after);
+    }
     if (changedProps.has("open")) {
       if (this.open) {
         this._step = "scan";
@@ -588,6 +605,8 @@ export class AddWineDialog extends LitElement {
         this._addProgress = 0;
         this._session++;
         this._labelLoading = false;
+        this._grow = null;
+        this._afterGrow = null;
         this._searchResults = [];
         this._captureStage = "front";
         this._frontImageRaw = "";
@@ -856,10 +875,9 @@ export class AddWineDialog extends LitElement {
     // Adding a bottle used to append past the end of a full bin, silently
     // growing it beyond its configured capacity. Refuse instead, the way
     // drag-and-drop and paste already do.
-    const { used, capacity, nextDepth, full } = this._zoneUsage(sr);
-    const label = sr.name || (sr.type === "box" ? "This box" : "This bin");
+    const { nextDepth, full } = this._zoneUsage(sr);
     if (full) {
-      this._error = `${label} is full (${used}/${capacity}). Free a slot, or raise its capacity in Manage Racks.`;
+      this._offerGrow(this._wineData.cabinet_id || "", `storage-${sr.row}`, 1, { kind: "zone", zone: `storage-${sr.row}` });
       return;
     }
     this._error = "";
@@ -878,11 +896,45 @@ export class AddWineDialog extends LitElement {
     const cabinet = this.cabinets.find((cab) => cab.id === c.cabinetId);
     const patch = placementIn(c, cabinet, this.wines);
     if (!patch) {
-      this._error = `${containerLabel(c, this.cabinets)} is full. Free a slot, or raise its capacity in Manage Racks.`;
+      // A bin, a box row or a grid slot can be made bigger; the bottom zone
+      // never reports full.
+      this._offerGrow(c.cabinetId, c.kind === "zone" ? c.zone : "", 1, { kind: "container", container: c });
       return;
     }
     this._error = "";
     this._wineData = { ...this._wineData, ...patch };
+  }
+
+  // Ask whether to make the full container bigger, instead of refusing.
+  private _offerGrow(cabinetId: string, zone: string, needed: number, after: AfterGrow) {
+    const cabinet = this.cabinets.find((c) => c.id === cabinetId);
+    if (!growKind(cabinet, zone)) {
+      this._error = "That destination is full.";
+      return;
+    }
+    this._error = "";
+    this._grow = { cabinetId, zone, needed, after };
+  }
+
+  private _onGrown() {
+    const after = this._grow?.after ?? { kind: "none" as const };
+    this._grow = null;
+    // The cabinets prop is replaced by the card once it has reloaded; the
+    // pending action runs then, in updated(), against the new size.
+    this._afterGrow = after;
+    this.dispatchEvent(new CustomEvent("cabinets-changed", { bubbles: true, composed: true }));
+  }
+
+  private _runAfterGrow(after: AfterGrow) {
+    if (after.kind === "zone") {
+      const cabinet = this.cabinets.find((c) => c.id === this._wineData.cabinet_id);
+      const sr = cabinet?.storage_rows.find((r) => `storage-${r.row}` === after.zone);
+      if (sr) this._selectZone(sr);
+    } else if (after.kind === "container") {
+      this._applyContainer(after.container);
+    } else if (after.kind === "next") {
+      this._onLocationNext();
+    }
   }
 
   private _planSlots(count: number): { row: number | null; col: number | null; zone: string; depth: number }[] {
@@ -895,10 +947,16 @@ export class AddWineDialog extends LitElement {
     return Number.isFinite(free) ? free : null;
   }
 
-  private _setQuantity(value: number) {
+  // A bin or box can be made bigger on the spot, so more bottles than there is
+  // room for may be asked for there; elsewhere the free space is the limit.
+  private _maxQuantity(): number {
     const available = this._availableSlots();
-    const max = available === null ? 99 : Math.max(1, Math.min(99, available));
-    this._quantity = Math.max(1, Math.min(max, Math.round(value) || 1));
+    if (available === null || this._wineData.zone) return 99;
+    return Math.max(1, Math.min(99, available));
+  }
+
+  private _setQuantity(value: number) {
+    this._quantity = Math.max(1, Math.min(this._maxQuantity(), Math.round(value) || 1));
   }
 
   private async _addWine() {
@@ -916,6 +974,11 @@ export class AddWineDialog extends LitElement {
         const slots = this._planSlots(this._quantity);
         if (!slots.length) {
           this._error = "No free slot left at that destination.";
+          this._loading = false;
+          return;
+        }
+        if (slots.length < this._quantity) {
+          this._error = `Room for ${slots.length} of the ${this._quantity} bottles. Make room first, or lower the quantity.`;
           this._loading = false;
           return;
         }
@@ -1385,7 +1448,6 @@ export class AddWineDialog extends LitElement {
           return html`
             <button
               class="suggest-item ${s.usage.full ? "full" : ""} ${selected ? "selected" : ""}"
-              ?disabled=${s.usage.full}
               @click=${() => this._applyContainer(s.container)}
             >
               <span class="suggest-where">${s.label}</span>
@@ -1458,7 +1520,7 @@ export class AddWineDialog extends LitElement {
                   <button
                     class="btn ${selected ? "btn-primary" : "btn-outline"}"
                     style="font-size:0.8em;padding:6px 10px${usage.full ? ";opacity:0.5" : ""}"
-                    title=${usage.full ? "Full — free a slot or raise its capacity" : ""}
+                    title=${usage.full ? "Full — click to make room" : ""}
                     @click=${() => this._selectZone(sr)}
                   >
                     ${sr.name || (sr.type === "box" ? "Box" : "Bulk Bin")}
@@ -1542,7 +1604,7 @@ export class AddWineDialog extends LitElement {
       let depth = 0;
       while (occupied.has(depth)) depth++;
       if (depth >= rackDepth) {
-        this._error = `Row ${d.row + 1}, column ${d.col + 1} is full (${occupied.size}/${rackDepth} deep).`;
+        this._offerGrow(d.cabinet_id || "", "", 1, { kind: "next" });
         return;
       }
       this._wineData = { ...this._wineData, depth };
@@ -1554,7 +1616,9 @@ export class AddWineDialog extends LitElement {
 
   private _renderQuantityPicker() {
     const available = this._availableSlots();
-    const max = available === null ? 99 : Math.max(1, Math.min(99, available));
+    const max = this._maxQuantity();
+    const shortfall =
+      available !== null && this._wineData.zone ? Math.max(0, this._quantity - available) : 0;
     const destination = this._wineData.cabinet_id
       ? this._planSlots(this._quantity)
       : null;
@@ -1587,6 +1651,14 @@ export class AddWineDialog extends LitElement {
       <div class="qty-hint">
         ${available === null
           ? "Identical bottles, added unassigned."
+          : shortfall > 0
+            ? html`Only ${available} free here.
+                <button
+                  class="btn btn-outline"
+                  style="font-size:0.85em;padding:4px 10px;margin-left:6px"
+                  @click=${() =>
+                    this._offerGrow(this._wineData.cabinet_id || "", this._wineData.zone || "", shortfall, { kind: "none" })}
+                >Make room for ${shortfall} more</button>`
           : available === 0
             ? "That destination is full."
             : html`${available} slot${available > 1 ? "s" : ""} free here.
@@ -1693,6 +1765,10 @@ export class AddWineDialog extends LitElement {
   render() {
     if (!this.open) return nothing;
 
+    const growCabinet = this._grow
+      ? this.cabinets.find((c) => c.id === this._grow!.cabinetId) ?? null
+      : null;
+
     return html`
       <div class="dialog-overlay" @click=${this._close}>
         <div class="dialog" @click=${(e: Event) => e.stopPropagation()}>
@@ -1704,6 +1780,16 @@ export class AddWineDialog extends LitElement {
           ${this._step === "confirm" ? this._renderConfirmStep() : nothing}
         </div>
       </div>
+      ${this._grow && growCabinet
+        ? html`<wine-grow-dialog
+            .hass=${this.hass}
+            .cabinet=${growCabinet}
+            .zone=${this._grow.zone}
+            .needed=${this._grow.needed}
+            @grown=${this._onGrown}
+            @cancel=${() => (this._grow = null)}
+          ></wine-grow-dialog>`
+        : nothing}
     `;
   }
 }

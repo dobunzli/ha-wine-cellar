@@ -4,11 +4,13 @@ import { sharedStyles } from "./styles";
 import { Wine, Cabinet, CellarStats, WINE_TYPE_COLORS, WineType, StorageRow, StorageRowType, BOX_SIZES, getRackSlots, getWineLocation } from "./models";
 import { matchesQuery } from "./utils/search";
 import { Finding, analyzeArrangement } from "./utils/arrange";
+import { zoneCapacity } from "./utils/location";
 
 import "./components/arrangement-dialog";
 import "./components/cabinet-grid";
 import "./components/wine-detail-dialog";
 import "./components/add-wine-dialog";
+import "./components/grow-dialog";
 import "./components/search-bar";
 import "./components/rack-settings-dialog";
 import "./components/wine-list-dialog";
@@ -51,6 +53,9 @@ export class WineCellarCard extends LitElement {
   @state() private _showBatchVivinoConfirm = false;
   @state() private _showBatchAiConfirm = false;
   @state() private _batchReprice = false;
+  // A full bin or box the user is being asked to make bigger, and what to
+  // re-run once it is (paste / move / drop all stopped at "full" before).
+  @state() private _grow: { cabinetId: string; zone: string; retry: () => void } | null = null;
   @state() private _batchAiFallback = false;
   @state() private _toast = "";
   @state() private _hasGemini = false;
@@ -889,13 +894,27 @@ export class WineCellarCard extends LitElement {
       (w) => w.cabinet_id === cabinet.id && w.zone === zone
     ).length;
     const nextDepth = this._firstFreeDepth(cabinet.id, zone);
-    const capacity = storageRow.capacity || 20;
+    const capacity = zoneCapacity(storageRow) || 20;
     const hasRoom = occupantCount < capacity && nextDepth < capacity;
+
+    // Full: offer to make it bigger, then redo this click against the new size.
+    const offerGrow = () =>
+      this._offerGrow(cabinet.id, zone, () => {
+        const fresh = this._cabinets.find((c) => c.id === cabinet.id);
+        const freshRow = fresh?.storage_rows?.find((r) => `storage-${r.row}` === zone);
+        if (fresh && freshRow) {
+          this._onZoneContainerClick(
+            new CustomEvent("zone-container-click", {
+              detail: { cabinet: fresh, zone, storageRow: freshRow },
+            })
+          );
+        }
+      });
 
     // If we have a copied wine, paste it in this zone instead of opening panel
     if (this._copiedWine) {
       if (!hasRoom) {
-        this._showToast(`"${storageRow.name || "Zone"}" is full — cannot paste here.`);
+        offerGrow();
         return;
       }
       this._pasteWine(cabinet.id, null, null, nextDepth, zone);
@@ -905,7 +924,7 @@ export class WineCellarCard extends LitElement {
     // If moving wine, drop it in this zone instead of opening panel
     if (this._movingWine) {
       if (!hasRoom) {
-        this._showToast(`"${storageRow.name || "Zone"}" is full — cannot move here.`);
+        offerGrow();
         return;
       }
       this._executeMoveWine(cabinet.id, null, null, zone);
@@ -913,7 +932,7 @@ export class WineCellarCard extends LitElement {
     }
     if (this._movingBuyListItem) {
       if (!hasRoom) {
-        this._showToast(`"${storageRow.name || "Zone"}" is full — cannot move here.`);
+        offerGrow();
         return;
       }
       this._executeMoveTocellar(cabinet.id, null, null, zone);
@@ -921,6 +940,18 @@ export class WineCellarCard extends LitElement {
     }
 
     this._openZonePanel(cabinet, zone, storageRow);
+  }
+
+  // Ask whether to make a full bin or box bigger; `retry` runs once it is.
+  private _offerGrow(cabinetId: string, zone: string, retry: () => void) {
+    this._grow = { cabinetId, zone, retry };
+  }
+
+  private async _onGrown() {
+    const grow = this._grow;
+    this._grow = null;
+    await this._loadData();
+    grow?.retry();
   }
 
   private _openZonePanel(cabinet: Cabinet, zone: string, storageRow: StorageRow) {
@@ -1588,10 +1619,10 @@ export class WineCellarCard extends LitElement {
         const targetCabinet = this._cabinets.find((c) => c.id === d.targetCabinetId);
         const rowIdx = parseInt(d.targetZone.replace("storage-", ""), 10);
         const storageRow = targetCabinet?.storage_rows?.find((s) => s.row === rowIdx);
-        const capacity = storageRow?.capacity || 20;
+        const capacity = (storageRow ? zoneCapacity(storageRow) : 0) || 20;
         targetDepth = this._firstFreeDepth(d.targetCabinetId, d.targetZone, d.wineId);
         if (storageRow && (occupants.length >= capacity || targetDepth >= capacity)) {
-          this._showToast(`"${storageRow.name || "Zone"}" is full — cannot move here.`);
+          this._offerGrow(d.targetCabinetId, d.targetZone, () => this._onWineDrop(e));
           return;
         }
       }
@@ -2788,7 +2819,20 @@ export class WineCellarCard extends LitElement {
           @close=${() => { this._showAddDialog = false; this._addToBuyListMode = false; }}
           @wine-added=${this._onWineAdded}
           @buy-list-updated=${() => this._loadData()}
+          @cabinets-changed=${() => this._loadData()}
         ></add-wine-dialog>
+
+        <!-- Make a full bin or box bigger (paste / move / drop) -->
+        ${this._grow
+          ? html`<wine-grow-dialog
+              .hass=${this.hass}
+              .cabinet=${this._cabinets.find((c) => c.id === this._grow!.cabinetId) ?? null}
+              .zone=${this._grow.zone}
+              .needed=${1}
+              @grown=${this._onGrown}
+              @cancel=${() => (this._grow = null)}
+            ></wine-grow-dialog>`
+          : nothing}
 
         <!-- Wine List Scanner Dialog -->
         <wine-list-dialog

@@ -80,6 +80,12 @@ CONF_METADATA_LANGUAGE = "metadata_language"
 DEFAULT_METADATA_LANGUAGE = "en"
 SUPPORTED_METADATA_LANGUAGES = ["en", "fr", "de"]
 
+# Limits for growing a full container from the card (see grow_container).
+BOX_SIZES = (1, 3, 6, 12, 24)  # mirrors BOX_SIZES in the frontend models
+MAX_RACK_DEPTH = 20  # mirrors the depth limit in websocket._CABINET_LIMITS
+MAX_BOXES_PER_ROW = 50
+MAX_BIN_CAPACITY = 999
+
 CONF_METADATA_CURRENCY = "metadata_currency"
 DEFAULT_METADATA_CURRENCY = "USD"
 SUPPORTED_METADATA_CURRENCIES = ["USD", "EUR", "GBP", "CHF"]
@@ -120,4 +126,4 @@ VIVINO_AUTO_SYNC_INTERVAL_HOURS = 12
 ATTR_TOTAL_BOTTLES = "total_bottles"
 ATTR_TOTAL_CAPACITY = "total_capacity"
 
-FRONTEND_VERSION = "20261003b"
+FRONTEND_VERSION = "20261003c"

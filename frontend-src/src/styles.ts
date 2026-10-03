@@ -255,12 +255,17 @@ export const sharedStyles = css`
     .dialog {
       width: 100%;
       max-width: 100%;
-      max-height: 100vh;
+      /* Stay below the status bar / notch. In the Companion app the page runs
+         edge-to-edge, so a full-height dialog put its top-right close button
+         under the clock and battery, where touches never reach it. */
+      max-height: calc(100vh - env(safe-area-inset-top, 0px));
       border-radius: 12px 12px 0 0;
       margin-top: auto;
     }
     .dialog-overlay {
       align-items: flex-end;
+      padding-top: env(safe-area-inset-top, 0px);
+      box-sizing: border-box;
     }
     .dialog-header {
       padding: 16px 16px 10px;

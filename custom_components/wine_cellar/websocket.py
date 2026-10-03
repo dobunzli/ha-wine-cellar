@@ -85,8 +85,14 @@ def _select_wines(storage: Any, wine_ids: list[str] | None) -> list[dict[str, An
     return [w for w in storage.wines if w.get("id") in wanted]
 
 
-def _build_ai_updates(wine: dict[str, Any], result: dict[str, Any], currency: str = "USD") -> dict[str, Any]:
-    """Build a wine `updates` dict from a Gemini analyze_single_wine result."""
+def _build_ai_updates(
+    wine: dict[str, Any], result: dict[str, Any], currency: str = "USD", reprice: bool = False
+) -> dict[str, Any]:
+    """Build a wine `updates` dict from a Gemini analyze_single_wine result.
+
+    `reprice` replaces a price that is already set. Off by default, so an
+    ordinary run never overwrites a price the user may have entered.
+    """
     updates: dict[str, Any] = {}
     if result.get("disposition"):
         updates["disposition"] = result["disposition"]
@@ -116,7 +122,7 @@ def _build_ai_updates(wine: dict[str, Any], result: dict[str, Any], currency: st
         # A price already captured in a different currency is stale, not
         # "already have one" — an unconverted number in the wrong currency
         # is worse than no number at all.
-        if not wine.get("retail_price") or wine.get("retail_price_currency") != currency:
+        if reprice or not wine.get("retail_price") or wine.get("retail_price_currency") != currency:
             updates["retail_price"] = round(float(est_price), 2)
             updates["retail_price_currency"] = currency
 
@@ -1225,6 +1231,7 @@ async def ws_analyze_single_wine(
     {
         vol.Required("type"): "wine_cellar/batch_analyze_wines",
         vol.Optional("wine_ids"): [str],
+        vol.Optional("reprice", default=False): bool,
     }
 )
 @websocket_api.async_response
@@ -1250,6 +1257,7 @@ async def ws_batch_analyze_wines(
 
     language = _get_metadata_language(hass)
     currency = _get_metadata_currency(hass)
+    reprice = msg.get("reprice", False)
     updated = 0
     unchanged = 0
     errors = 0
@@ -1266,7 +1274,7 @@ async def ws_batch_analyze_wines(
                 errors += 1
                 continue
 
-            updates = _build_ai_updates(wine, result, currency)
+            updates = _build_ai_updates(wine, result, currency, reprice)
             had_changes = bool(updates)
 
             # The check is always recorded; the update timestamp only moves

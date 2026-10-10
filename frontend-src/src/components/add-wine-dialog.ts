@@ -1433,6 +1433,8 @@ export class AddWineDialog extends LitElement {
     const suggestions = suggestDestinations(this._wineData, this.wines, this.cabinets, 3);
     if (!suggestions.length) return nothing;
     const current = containerOf(this._wineData as Wine);
+    // The same-type fallback only appears alone, so one tier says it all.
+    const byType = suggestions[0].tier === "same-type";
 
     const spaceText = (s: Suggestion) => {
       if (s.usage.full) return `Full · ${s.usage.used}/${s.usage.capacity}`;
@@ -1442,7 +1444,9 @@ export class AddWineDialog extends LitElement {
 
     return html`
       <div class="suggest-strip">
-        <div class="suggest-title">Suggested — where its relatives are</div>
+        <div class="suggest-title">
+          ${byType ? "Suggested — where this type is kept" : "Suggested — where its relatives are"}
+        </div>
         ${suggestions.map((s) => {
           const selected = !!current && sameContainer(current, s.container);
           return html`
@@ -1459,7 +1463,7 @@ export class AddWineDialog extends LitElement {
             ${s.alternative
               ? html`
                   <div class="suggest-alt">
-                    No room left there — split the series into
+                    No room left there — ${byType ? "put it in" : "split the series into"}
                     <button @click=${() => this._applyContainer(s.alternative!.container)}>
                       ${s.alternative.label}
                     </button>

@@ -1,4 +1,4 @@
-import { Cabinet, StorageRow, Wine, getRackSlots } from "../models";
+import { Cabinet, StorageRow, Wine, WineType, getRackSlots } from "../models";
 
 // Shared "where does a bottle physically sit" helpers.
 //
@@ -240,4 +240,24 @@ export function freeAt(
     (w) => w.cabinet_id === cabinet.id && w.row !== null && w.col !== null
   ).length;
   return Math.max(0, total - used);
+}
+
+// The share of one type above which a container reads as "the sparkling bin",
+// even though nothing declares it so. The arrangement report uses it to spot
+// intruders, the add dialog to point a bottle at its type's usual home.
+export const TYPE_DOMINANCE = 0.75;
+
+export function dominantType(bottles: Wine[]): { type: WineType; count: number; share: number } | null {
+  const counts = new Map<WineType, number>();
+  for (const w of bottles) counts.set(w.type, (counts.get(w.type) || 0) + 1);
+  let best: WineType | null = null;
+  let bestCount = 0;
+  for (const [type, count] of counts) {
+    if (count > bestCount) {
+      best = type;
+      bestCount = count;
+    }
+  }
+  if (best === null) return null;
+  return { type: best, count: bestCount, share: bestCount / bottles.length };
 }

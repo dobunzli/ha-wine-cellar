@@ -7,6 +7,8 @@ import {
   containerOf,
   containerUsage,
   containersOf,
+  dominantType,
+  TYPE_DOMINANCE,
 } from "./location";
 import { cuveeKey } from "./suggest";
 
@@ -47,7 +49,6 @@ export interface Finding {
 
 const MIN_GROUP_BOTTLES = 3;
 const MIN_CONTAINER_BOTTLES = 4;
-const DOMINANCE = 0.75;
 const MAX_INTRUDERS = 2;
 
 const groupKey = (w: Wine) =>
@@ -86,21 +87,6 @@ function placedWines(wines: Wine[], live: ReturnType<typeof liveContainers>) {
       (x): x is { wine: Wine; container: Container } =>
         x.container !== null && live.has(containerKey(x.container))
     );
-}
-
-function dominantType(bottles: Wine[]): { type: WineType; share: number } | null {
-  const counts = new Map<WineType, number>();
-  for (const w of bottles) counts.set(w.type, (counts.get(w.type) || 0) + 1);
-  let best: WineType | null = null;
-  let bestCount = 0;
-  for (const [type, count] of counts) {
-    if (count > bestCount) {
-      best = type;
-      bestCount = count;
-    }
-  }
-  if (best === null) return null;
-  return { type: best, share: bestCount / bottles.length };
 }
 
 // Bottles of one wine scattered across several places. The fix is real work,
@@ -194,7 +180,7 @@ function findOutliers(
   const homes = new Map<WineType, { container: Container; cabinet: Cabinet; count: number }[]>();
   for (const [ck, bottles] of byContainer) {
     const dom = dominantType(bottles);
-    if (!dom || dom.share < DOMINANCE) continue;
+    if (!dom || dom.share < TYPE_DOMINANCE) continue;
     const entry = live.get(ck)!;
     const list = homes.get(dom.type) || [];
     list.push({ ...entry, count: bottles.filter((w) => w.type === dom.type).length });
@@ -205,7 +191,7 @@ function findOutliers(
   for (const [ck, bottles] of byContainer) {
     if (bottles.length < MIN_CONTAINER_BOTTLES) continue;
     const dom = dominantType(bottles);
-    if (!dom || dom.share < DOMINANCE) continue;
+    if (!dom || dom.share < TYPE_DOMINANCE) continue;
     const intruders = bottles.filter((w) => w.type !== dom.type);
     if (!intruders.length || intruders.length > MAX_INTRUDERS) continue;
 

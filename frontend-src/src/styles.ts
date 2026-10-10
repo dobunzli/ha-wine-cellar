@@ -78,34 +78,6 @@ export const sharedStyles = css`
     border-color: var(--wc-primary);
   }
 
-  .manage-racks-btn {
-    margin-left: auto;
-    border-color: transparent;
-    color: var(--wc-primary-text);
-    font-weight: 500;
-    font-size: 0.8em;
-    padding: 6px 12px;
-  }
-
-  .manage-racks-btn:hover {
-    background: var(--wc-hover);
-  }
-
-  /* Sits right after .manage-racks-btn with the tab-bar's normal gap — no
-     margin-left: auto of its own, or it would claim the remaining space and
-     drift away from it instead of staying grouped together. */
-  .settings-tab-btn {
-    border-color: transparent;
-    color: var(--wc-primary-text);
-    font-weight: 500;
-    font-size: 0.8em;
-    padding: 6px 12px;
-  }
-
-  .settings-tab-btn:hover {
-    background: var(--wc-hover);
-  }
-
   .btn {
     display: inline-flex;
     align-items: center;

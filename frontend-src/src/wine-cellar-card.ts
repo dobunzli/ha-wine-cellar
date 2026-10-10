@@ -95,6 +95,7 @@ export class WineCellarCard extends LitElement {
   private _toastTimer = 0;
 
   @state() private _showArrangement = false;
+  @state() private _menuOpen = false;
   @state() private _dismissedArrangements: string[] = [];
   @state() private _buyList: Wine[] = [];
   @state() private _addToBuyListMode = false;
@@ -249,10 +250,102 @@ export class WineCellarCard extends LitElement {
 
       .header-actions {
         display: flex;
-        gap: 4px;
+        gap: 6px;
         align-items: center;
-        flex-wrap: wrap;
         justify-content: flex-end;
+        flex-shrink: 0;
+      }
+
+      .header-btn {
+        font-size: 0.85em;
+        padding: 6px 12px;
+        gap: 4px;
+      }
+
+      .header-btn.open {
+        background: var(--wc-hover);
+      }
+
+      .busy-pill {
+        display: inline-flex;
+        gap: 4px;
+        font-size: 0.75em;
+        color: var(--wc-text-secondary);
+        white-space: nowrap;
+      }
+
+      .menu-anchor {
+        position: relative;
+      }
+
+      .menu-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+      }
+
+      .header-menu {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        z-index: 21;
+        width: 300px;
+        max-width: calc(100vw - 24px);
+        padding: 4px 0;
+        background: var(--wc-surface);
+        border: 1px solid var(--wc-border);
+        border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+      }
+
+      .menu-item {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        width: 100%;
+        padding: 8px 14px;
+        border: none;
+        background: transparent;
+        color: var(--wc-text);
+        text-align: left;
+        cursor: pointer;
+        font: inherit;
+      }
+
+      .menu-item:hover:not(:disabled) {
+        background: var(--wc-hover);
+      }
+
+      .menu-item:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .menu-icon {
+        width: 20px;
+        text-align: center;
+      }
+
+      .menu-text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .menu-label {
+        font-size: 0.9em;
+        font-weight: 500;
+      }
+
+      .menu-hint {
+        font-size: 0.75em;
+        color: var(--wc-text-secondary);
+      }
+
+      .menu-divider {
+        height: 1px;
+        margin: 4px 0;
+        background: var(--wc-border);
       }
 
       .cabinets-row {
@@ -506,6 +599,24 @@ export class WineCellarCard extends LitElement {
         .btn-primary {
           padding: 6px 12px;
           font-size: 0.85em;
+        }
+        .header-row {
+          gap: 8px;
+        }
+        .title-text {
+          min-width: 0;
+        }
+        /* Icons only, so the header stays one row; title and aria-label
+           still name each button. */
+        .header-btn .btn-label {
+          display: none;
+        }
+        .header-btn {
+          padding: 6px 10px;
+          font-size: 1em;
+        }
+        .busy-text {
+          display: none;
         }
       }
 
@@ -2110,6 +2221,92 @@ export class WineCellarCard extends LitElement {
     return this._wines.filter((w) => !w.cabinet_id || !cabinetIds.has(w.cabinet_id));
   }
 
+  // The batch actions used to show their progress in their own button label.
+  // Now that they live in a closed menu, this is what still says one is running.
+  private _renderBusyPill() {
+    const label = this._analyzing
+      ? "AI scanning…"
+      : this._batchVivino
+        ? "Vivino scanning…"
+        : this._vivinoSyncing
+          ? (this._vivinoSyncMode ? "Vivino syncing…" : "Vivino importing…")
+          : "";
+    return label
+      ? html`<span class="busy-pill" title=${label}>⏳<span class="busy-text">${label}</span></span>`
+      : nothing;
+  }
+
+  // Everything used now and then rather than on every visit: the whole-cellar
+  // runs, the list scanner, rack layout and settings. Only "Add wine" and
+  // "Inventory" stay on screen.
+  private _renderHeaderMenu() {
+    const busy = this._analyzing || this._batchVivino || this._vivinoSyncing;
+    const item = (icon: string, label: string, hint: string, action: () => void, disabled = false) => html`
+      <button
+        class="menu-item"
+        role="menuitem"
+        ?disabled=${disabled}
+        @click=${() => {
+          this._menuOpen = false;
+          action();
+        }}
+      >
+        <span class="menu-icon">${icon}</span>
+        <span class="menu-text">
+          <span class="menu-label">${label}</span>
+          ${hint ? html`<span class="menu-hint">${hint}</span>` : nothing}
+        </span>
+      </button>
+    `;
+    return html`
+      <div class="menu-backdrop" @click=${() => (this._menuOpen = false)}></div>
+      <div
+        class="header-menu"
+        role="menu"
+        @keydown=${(e: KeyboardEvent) => {
+          if (e.key === "Escape") this._menuOpen = false;
+        }}
+      >
+        ${this._hasGemini
+          ? html`
+              ${item("🍽️", "Scan a wine list", "Restaurant menu or receipt: ratings and value", () => (this._showWineList = true))}
+              <div class="menu-divider"></div>
+            `
+          : nothing}
+        ${item(
+          "🍇",
+          this._batchVivino ? "Vivino scanning…" : "Refresh all wines from Vivino",
+          "Ratings, prices and descriptions — free",
+          () => this._batchRefreshVivino(),
+          busy
+        )}
+        ${this._hasGemini
+          ? item(
+              "🤖",
+              this._analyzing ? "AI scanning…" : "AI analysis of all wines",
+              "Disposition, ratings, price, description — billed by your AI provider",
+              () => this._batchAnalyzeWines(),
+              busy
+            )
+          : nothing}
+        ${this._hasVivinoAccount
+          ? item(
+              this._vivinoSyncMode ? "🔄" : "⬇️",
+              this._vivinoSyncMode ? "Vivino sync" : "Vivino import",
+              this._vivinoSyncMode
+                ? "Import from Vivino and push your changes back"
+                : "Import your Vivino cellar and wishlist (never writes to Vivino)",
+              () => this._syncVivino(),
+              busy
+            )
+          : nothing}
+        <div class="menu-divider"></div>
+        ${item("🗄️", "Manage racks", "", () => (this._showRackSettings = true))}
+        ${item("⚙️", "Vivino and AI settings", "", () => (this._showVivinoAiSettings = true))}
+      </div>
+    `;
+  }
+
   render() {
     if (this._loading) {
       return html`
@@ -2134,71 +2331,44 @@ export class WineCellarCard extends LitElement {
             <span class="title-icon">🍷</span>
             <div class="title-text">
               <div>${title}</div>
-              <div class="title-credit">originally created by @BaconWappedBitcoin</div>
+              <div class="title-credit">
+                originally created by @BaconWappedBitcoin · modified by @dobunzli
+              </div>
             </div>
           </div>
           <div class="header-actions">
-            ${this._hasGemini ? html`
-              <button
-                class="btn btn-primary"
-                style="font-size: 0.8em; padding: 5px 10px; background: #1565c0;"
-                @click=${this._batchAnalyzeWines}
-                title="Full AI analysis on all wines (disposition, ratings, price, description)"
-                ?disabled=${this._analyzing || this._batchVivino}
-              >
-                ${this._analyzing ? "AI Scanning..." : "🤖 AI Batch Scan"}
-              </button>
-            ` : nothing}
+            ${this._renderBusyPill()}
             <button
-              class="btn btn-primary"
-              style="font-size: 0.8em; padding: 5px 10px; background: #8e24aa;"
-              @click=${this._batchRefreshVivino}
-              title="Refresh all wines from Vivino (ratings, price, description)"
-              ?disabled=${this._batchVivino || this._analyzing}
-            >
-              ${this._batchVivino ? "Vivino Scanning..." : "🍇 Vivino Batch Scan"}
-            </button>
-            ${this._hasVivinoAccount ? html`
-              <button
-                class="btn btn-primary"
-                style="font-size: 0.8em; padding: 5px 10px; background: #b71c1c;"
-                @click=${this._syncVivino}
-                title=${this._vivinoSyncMode
-                  ? "Two-way sync: import from Vivino and push your Cork Dork changes back"
-                  : "Import your Vivino cellar and wishlist into Cork Dork (never writes to Vivino)"}
-                ?disabled=${this._vivinoSyncing || this._batchVivino || this._analyzing}
-              >
-                ${this._vivinoSyncing
-                  ? (this._vivinoSyncMode ? "Vivino Syncing..." : "Vivino Importing...")
-                  : (this._vivinoSyncMode ? "🔄 Vivino Sync" : "⬇️ Vivino Import")}
-              </button>
-            ` : nothing}
-            ${this._hasGemini ? html`
-              <button
-                class="btn btn-primary"
-                style="font-size: 0.8em; padding: 5px 10px; background: #00695c;"
-                @click=${() => (this._showWineList = true)}
-                title="Scan a wine list or receipt for ratings and value"
-              >
-                🍽️ Scan List
-              </button>
-            ` : nothing}
-            <button
-              class="btn btn-primary"
-              style="font-size: 0.8em; padding: 5px 10px; background: #37474f;"
+              class="btn btn-outline header-btn"
               @click=${() => (this._showInventory = true)}
               title="Browse full cellar inventory"
+              aria-label="Inventory"
             >
-              📦 Inventory
+              📦<span class="btn-label">Inventory</span>
             </button>
+            <div class="menu-anchor">
+              <button
+                class="btn btn-outline header-btn ${this._menuOpen ? "open" : ""}"
+                @click=${() => (this._menuOpen = !this._menuOpen)}
+                title="More actions"
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded=${this._menuOpen ? "true" : "false"}
+              >
+                ⋯
+              </button>
+              ${this._menuOpen ? this._renderHeaderMenu() : nothing}
+            </div>
             <button
-              class="btn btn-primary"
+              class="btn btn-primary header-btn"
+              title="Add wine"
+              aria-label="Add wine"
               @click=${() => {
                 this._addPreselect = { cabinet: "", row: null, col: null, zone: "", depth: 0 };
                 this._showAddDialog = true;
               }}
             >
-              + Add Wine
+              +<span class="btn-label">Add Wine</span>
             </button>
           </div>
         </div>
@@ -2264,7 +2434,7 @@ export class WineCellarCard extends LitElement {
                 ${this._stats.total_value
                   ? html`
                       <div class="stat">
-                        <span class="stat-value">${this._metadataCurrency} ${this._stats.total_value.toLocaleString()}</span>
+                        <span class="stat-value">${this._metadataCurrency} ${Math.round(this._stats.total_value).toLocaleString()}</span>
                         value
                         ${this._stats.total_cost
                           ? html`<span style="font-size:0.75em;color:${this._stats.total_value - this._stats.total_cost >= 0 ? '#2e7d32' : '#c62828'}">${this._stats.total_value - this._stats.total_cost >= 0 ? '+' : ''}${this._metadataCurrency} ${(this._stats.total_value - this._stats.total_cost).toLocaleString(undefined, {minimumFractionDigits: 0, maximumFractionDigits: 0})}</span>`
@@ -2312,18 +2482,6 @@ export class WineCellarCard extends LitElement {
             style="${this._activeTab === "buy-list" ? "border-color: #e65100; color: #e65100;" : ""}"
           >
             Buy List (${this._buyList.length})
-          </button>
-          <button
-            class="tab manage-racks-btn"
-            @click=${() => (this._showRackSettings = true)}
-          >
-            Manage Racks
-          </button>
-          <button
-            class="tab settings-tab-btn"
-            @click=${() => (this._showVivinoAiSettings = true)}
-          >
-            ⚙️ Vivino/AI Settings
           </button>
         </div>
 

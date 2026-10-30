@@ -43,6 +43,7 @@
       "ai_provider_incomplete": "Base URL, API key, and model are all required for an OpenAI-compatible provider.",
       "ai_provider_invalid_auth": "The AI API key was rejected by the endpoint.",
       "ai_provider_cannot_connect": "Could not connect to the AI base URL. Check the address and try again.",
+      "ai_provider_empty_response": "The API key was accepted, but this model returned nothing. It may have been retired: check the model name with your provider.",
       "vivino_invalid_auth": "Vivino rejected the session cookie — it may be expired or wrong. Paste a fresh one from your logged-in browser.",
       "vivino_cannot_connect": "Could not reach Vivino — check your network connection and try again.",
       "vivino_incomplete": "Enter both the cellar URL and the session cookie, or leave both empty to disable the connection."

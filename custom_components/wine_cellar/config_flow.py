@@ -205,12 +205,13 @@ class WineCellarOptionsFlow(OptionsFlow):
         if not base_url or not api_key or not model:
             return {"base": "ai_provider_incomplete"}
 
-        # Only re-verify when the endpoint/key actually changed, to avoid a
-        # network round-trip on every unrelated options save.
+        # Only re-verify when the endpoint/key/model actually changed, to avoid
+        # a network round-trip on every unrelated options save.
         options = self.config_entry.options
         if (
             base_url == options.get(CONF_AI_BASE_URL)
             and api_key == options.get(CONF_AI_API_KEY)
+            and model == options.get(CONF_AI_MODEL)
         ):
             return {}
 
@@ -218,12 +219,12 @@ class WineCellarOptionsFlow(OptionsFlow):
         # hand out the full /v1/chat/completions URL to paste as-is (with a
         # per-account path segment), so a guessed /v1/models path can 404
         # even when the real chat endpoint works fine.
-        from .gemini import resolve_openai_chat_endpoint
+        from .gemini import is_empty_chat_reply, resolve_openai_chat_endpoint
 
         chat_url = resolve_openai_chat_endpoint(base_url)
         session = async_get_clientsession(self.hass)
         try:
-            timeout = aiohttp.ClientTimeout(total=10)
+            timeout = aiohttp.ClientTimeout(total=20)
             async with session.post(
                 chat_url,
                 headers={
@@ -244,6 +245,8 @@ class WineCellarOptionsFlow(OptionsFlow):
                         "AI provider connectivity check failed: HTTP %s", resp.status
                     )
                     return {"base": "ai_provider_cannot_connect"}
+                if resp.status == 200 and is_empty_chat_reply(await resp.text()):
+                    return {"base": "ai_provider_empty_response"}
                 # Any other response (200, or a 4xx from the model rejecting
                 # the trivial ping prompt) still proves the endpoint and
                 # auth are reachable — good enough to save.

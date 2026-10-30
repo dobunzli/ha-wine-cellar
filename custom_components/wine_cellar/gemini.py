@@ -33,6 +33,23 @@ def build_gemini_api_url(model: str = DEFAULT_GEMINI_MODEL) -> str:
     )
 
 
+def is_empty_chat_reply(raw_text: str) -> bool:
+    """Tell whether a chat completion body came back with no answer at all.
+
+    Some relays answer HTTP 200 with empty content for a model they no longer
+    serve, so the status alone proves nothing. A body that is not a chat
+    completion, or a reply cut short by max_tokens, says nothing about the
+    model either way and does not count.
+    """
+    try:
+        choice = json.loads(raw_text)["choices"][0]
+        content = choice["message"].get("content")
+        finish_reason = choice.get("finish_reason")
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return False
+    return not str(content or "").strip() and finish_reason != "length"
+
+
 def parse_json_response(raw_text: str) -> Any:
     """Parse an AI JSON response even when wrapped in markdown fences or extra prose.
 
@@ -873,8 +890,21 @@ class OpenAICompatibleClient(BaseAIClient):
                     _LOGGER.warning("AI API returned no choices: %s", resp_text[:500])
                     return {"error": "AI API returned no results"}
 
-                text = choices[0].get("message", {}).get("content", "")
+                text = choices[0].get("message", {}).get("content") or ""
                 _LOGGER.debug("AI raw response: %s", text[:500])
+                if not text.strip():
+                    _LOGGER.warning(
+                        "AI model %s returned an empty response: %s",
+                        self._model,
+                        resp_text[:500],
+                    )
+                    return {
+                        "error": (
+                            f'AI model "{self._model}" returned an empty response. '
+                            "It may have been retired: check the model name in "
+                            "the integration options."
+                        )
+                    }
                 return parse_json_response(text)
 
         except json.JSONDecodeError as err:
